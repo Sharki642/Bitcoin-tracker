@@ -6,6 +6,7 @@ Beispiele:
     python btc_tracker.py -c usd -i 30       # USD, alle 30s
     python btc_tracker.py --log btc.csv      # zusätzlich in CSV loggen
 """
+import tkinter as tk
 import argparse
 import csv
 import json
@@ -14,6 +15,11 @@ import time
 from datetime import datetime
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+root = tk.Tk()
+root.title("Bitcoin Tracker")
+root.geometry("400x200")
+root.configure(bg="grey")
+root.mainloop()
 
 URL = (
     "https://api.coingecko.com/api/v3/simple/price"
