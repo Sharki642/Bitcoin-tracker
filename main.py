@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
-"""Bitcoin Price Tracker mit GUI – Binance (Fallback: CoinGecko), nur Standardbibliothek.
+"""Bitcoin Price Tracker mit GUI (PySide6) – Binance (Fallback: CoinGecko).
 
+- Nur der Fenster-HINTERGRUND ist durchsichtig, der Text bleibt voll sichtbar
 - Jede Zeile wird automatisch in btc_log.csv gespeichert (inkl. Wert deines Anteils)
 - Dein Bestand wird in btc_state.json gespeichert und beim Start automatisch geladen
 - Beim Start werden die letzten 3 Minuten Kursverlauf nachgeladen und mitgeloggt
+- Fenster-Icon: logo.png neben dem Script
+
+Installation:  pip install PySide6
 
 Beispiele:
-    python btc_tracker_gui.py                  # EUR, alle 60s
-    python btc_tracker_gui.py -c usd -i 30     # USD, alle 30s
-    python btc_tracker_gui.py --log mein.csv   # anderer Log-Dateiname
+    python main.py                    # EUR, alle 60s
+    python main.py -c usd -i 30       # USD, alle 30s
+    python main.py --opacity 0.3      # Hintergrund noch durchsichtiger (0 = ganz klar, 1 = solid)
 """
 import argparse
 import csv
 import json
 import queue
+import sys
 import threading
-import tkinter as tk
-import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
-from tkinter import simpledialog
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel,
+                               QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
 
 BASE = Path(__file__).resolve().parent  # Dateien liegen neben dem Script, egal von wo gestartet
 STATE_FILE = BASE / "btc_state.json"
@@ -34,9 +41,9 @@ COINGECKO = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_curren
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 LOG_HEADER = ["timestamp", "price", "change_pct_vs_last", "btc_amount", "value", "source"]
 
-BG, CARD, FG = "#1e1e1e", "#2a2a2e", "#d4d4d4"
-GREEN, RED, GREY, YELLOW = "#4ec96b", "#f0616d", "#8a8a8a", "#e5c07b"
+FG, GREEN, RED, GREY, YELLOW = "#e4e4e4", "#4ec96b", "#f0616d", "#9a9a9a", "#e5c07b"
 ORANGE, ORANGE_HOVER, ORANGE_PRESS = "#f7931a", "#ffa940", "#d97f0f"
+TAG_COLORS = {"": FG, "up": GREEN, "down": RED, "hist": GREY, "info": YELLOW}
 
 
 # ---------- Daten holen ----------
@@ -111,39 +118,20 @@ def log_row(path, row):
 
 
 # ---------- GUI ----------
-class RoundedButton(tk.Canvas):
-    """Flacher Button mit runden Ecken und Hover-/Klick-Effekt."""
-
-    def __init__(self, parent, text, command, parent_bg=CARD, radius=10, padx=18, pady=9):
-        font = tkfont.Font(family="monospace", size=11, weight="bold")
-        w = font.measure(text) + 2 * padx
-        h = font.metrics("linespace") + 2 * pady
-        super().__init__(parent, width=w, height=h, bg=parent_bg, bd=0,
-                         highlightthickness=0, cursor="hand2")
-        self.command, self.w, self.h = command, w, h
-        r = radius
-        pts = [r, 1, w - r, 1, w - 1, 1, w - 1, r, w - 1, h - r, w - 1, h - 1, w - r, h - 1,
-               r, h - 1, 1, h - 1, 1, h - r, 1, r, 1, 1]
-        self.shape = self.create_polygon(pts, smooth=True, fill=ORANGE, outline=ORANGE)
-        self.create_text(w / 2, h / 2, text=text, fill="#1e1e1e", font=font)
-        self.bind("<Enter>", lambda e: self._color(ORANGE_HOVER))
-        self.bind("<Leave>", lambda e: self._color(ORANGE))
-        self.bind("<ButtonPress-1>", lambda e: self._color(ORANGE_PRESS))
-        self.bind("<ButtonRelease-1>", self._release)
-
-    def _color(self, c):
-        self.itemconfig(self.shape, fill=c, outline=c)
-
-    def _release(self, e):
-        inside = 0 <= e.x <= self.w and 0 <= e.y <= self.h
-        self._color(ORANGE_HOVER if inside else ORANGE)
-        if inside:
-            self.command()
+SCROLLBAR_CSS = """
+QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+QScrollBar::handle:vertical { background: rgba(255,255,255,70); border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: rgba(255,255,255,130); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+"""
 
 
-class TrackerApp:
-    def __init__(self, root, cur, interval, log_path, opacity=0.85):
-        self.root, self.cur, self.interval, self.log_path = root, cur, interval, log_path
+class TrackerApp(QWidget):
+    def __init__(self, cur, interval, log_path, opacity):
+        super().__init__()
+        self.cur, self.interval, self.log_path = cur, interval, log_path
+        self.bg_alpha = int(255 * opacity)  # nur der Hintergrund, Text bleibt solid
         self.last = None
         self.pending_eur = None
         self.q = queue.Queue()
@@ -154,43 +142,70 @@ class TrackerApp:
         self.invested = state.get("invested")      # Betrag, den du eingegeben hast
         prepare_log(self.log_path)
 
-        root.title(f"Bitcoin Tracker – BTC/{cur.upper()}")
-        root.geometry("720x430")
-        root.configure(bg=BG)
-        root.after(300, lambda: root.attributes("-alpha", opacity)) # Fenster-Transparenz (braucht Compositor, KDE hat einen)
-        self._icon = self.load_icon()  # Referenz behalten, sonst verschwindet das Icon
-        if self._icon:
-            root.iconphoto(True, self._icon)
+        self.setWindowTitle(f"Bitcoin Tracker – BTC/{cur.upper()}")
+        self.setWindowIcon(QIcon(str(LOGO_FILE)))  # fehlt die Datei, bleibt das System-Icon
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(720, 430)
 
-        self.header = tk.Label(root, text="Lade …", font=("monospace", 24, "bold"),
-                               bg=BG, fg=FG, pady=12)
-        self.header.pack(fill="x")
+        mono = QFontDatabase.systemFont(QFontDatabase.FixedFont).family()
 
-        bar = tk.Frame(root, bg=CARD)
-        bar.pack(fill="x", padx=10, pady=(0, 10), ipadx=10, ipady=8)
-        RoundedButton(bar, "Bestand eingeben", self.set_amount).pack(side="left", padx=(10, 0))
-        box = tk.Frame(bar, bg=CARD)
-        box.pack(side="right", padx=(0, 10))
-        self.value_label = tk.Label(box, text="", font=("monospace", 18, "bold"),
-                                    bg=CARD, fg=FG, anchor="e")
-        self.value_label.pack(anchor="e")
-        self.pl_label = tk.Label(box, text="", font=("monospace", 10), bg=CARD, fg=FG, anchor="e")
-        self.pl_label.pack(anchor="e")
+        def font(size, bold=False):
+            f = QFont(mono, size)
+            f.setBold(bold)
+            return f
 
-        frame = tk.Frame(root, bg=BG)
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.scroll = tk.Scrollbar(frame, width=12, bd=0, relief="flat", highlightthickness=0,
-                                   bg="#3c3c42", troughcolor=BG, activebackground="#55555c")
-        self.scroll.pack(side="right", fill="y")
-        self.text = tk.Text(frame, bg=BG, fg=FG, font=("monospace", 11), state="disabled",
-                            yscrollcommand=self.scroll.set, bd=0, highlightthickness=0,
-                            wrap="none", padx=6, pady=4)
-        self.text.pack(side="left", fill="both", expand=True)
-        self.scroll.config(command=self.text.yview)
-        self.text.tag_config("up", foreground=GREEN)
-        self.text.tag_config("down", foreground=RED)
-        self.text.tag_config("hist", foreground=GREY)
-        self.text.tag_config("info", foreground=YELLOW)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 4, 10, 10)
+        root.setSpacing(8)
+
+        self.header = QLabel("Lade …")
+        self.header.setFont(font(24, True))
+        self.header.setAlignment(Qt.AlignCenter)
+        self.header.setStyleSheet(f"color: {FG}; padding: 6px;")
+        root.addWidget(self.header)
+
+        # Karte: Button links, Wert rechts
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet("#card { background: rgba(255,255,255,24); border-radius: 8px; }")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(14, 10, 14, 10)
+
+        btn = QPushButton("Bestand eingeben")
+        btn.setFont(font(11, True))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton {{ background: {ORANGE}; color: #1e1e1e; border: none;"
+            f" border-radius: 10px; padding: 9px 18px; }}"
+            f"QPushButton:hover {{ background: {ORANGE_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {ORANGE_PRESS}; }}")
+        btn.clicked.connect(self.set_amount)
+        row.addWidget(btn)
+        row.addStretch()
+
+        box = QVBoxLayout()
+        box.setSpacing(0)
+        self.value_label = QLabel("")
+        self.value_label.setFont(font(18, True))
+        self.value_label.setAlignment(Qt.AlignRight)
+        self.pl_label = QLabel("")
+        self.pl_label.setFont(font(10))
+        self.pl_label.setAlignment(Qt.AlignRight)
+        box.addWidget(self.value_label)
+        box.addWidget(self.pl_label)
+        row.addLayout(box)
+        root.addWidget(card)
+
+        # Log
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setFont(font(11))
+        self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.log.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.log.setMaximumBlockCount(MAX_LINES)
+        self.log.setFrameShape(QFrame.NoFrame)
+        self.log.setStyleSheet(f"QPlainTextEdit {{ background: transparent; color: {FG}; }}" + SCROLLBAR_CSS)
+        root.addWidget(self.log, 1)
 
         if self.amount is not None:
             inv = f", eingezahlt {self.invested:,.2f} {cur.upper()}" if self.invested else ""
@@ -198,20 +213,15 @@ class TrackerApp:
         self.append(f"Log: {self.log_path}\n", "info")
 
         threading.Thread(target=self.worker, daemon=True).start()
-        root.after(200, self.poll)
-        root.protocol("WM_DELETE_WINDOW", self.close)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start(200)
 
-    @staticmethod
-    def load_icon():
-        """logo.png neben dem Script (große Bilder werden auf max. 256 px verkleinert)."""
-        try:
-            img = tk.PhotoImage(file=str(LOGO_FILE))
-        except tk.TclError:
-            return None  # logo.png fehlt -> Standard-Icon des Systems
-        factor = max(1, max(img.width(), img.height()) // 256)
-        return img.subsample(factor) if factor > 1 else img
+    # --- Hintergrund halbtransparent zeichnen (Text/Widgets bleiben solid) ---
+    def paintEvent(self, _event):
+        QPainter(self).fillRect(self.rect(), QColor(30, 30, 30, self.bg_alpha))
 
-    # --- Hintergrund ---
+    # --- Hintergrund-Thread ---
     def worker(self):
         try:
             for ts, price in get_history(self.cur, HISTORY_MINUTES):
@@ -232,7 +242,6 @@ class TrackerApp:
                 self.append(f"[{datetime.now():%H:%M:%S}] Fehler: {msg[1]}\n", "info")
             else:
                 self.show_price(msg[1], msg[2], hist=(msg[0] == "hist"))
-        self.root.after(200, self.poll)
 
     # --- Anzeige ---
     def show_price(self, ts, price, hist=False):
@@ -262,8 +271,8 @@ class TrackerApp:
         else:     # Kurs-Teil nach Kursbewegung, Wert-Teil nach Plus/Minus gegenüber Einzahlung
             self.append_parts([(main, tag), (value_txt + "\n", self.pl_tag(value))])
         if not hist:
-            self.header.config(text=f"{price:,.2f} {cur}",
-                               fg=GREEN if tag == "up" else RED if tag == "down" else FG)
+            self.header.setStyleSheet(f"color: {TAG_COLORS[tag]}; padding: 6px;")
+            self.header.setText(f"{price:,.2f} {cur}")
             self.update_value()
 
         log_row(self.log_path, [
@@ -285,13 +294,15 @@ class TrackerApp:
         if self.amount is None or self.last is None:
             return
         value, cur = self.amount * self.last, self.cur.upper()
-        color = {"up": GREEN, "down": RED, "": FG}[self.pl_tag(value)]
-        self.value_label.config(text=f"{value:,.2f} {cur}", fg=color)
+        color = TAG_COLORS[self.pl_tag(value)]
+        self.value_label.setStyleSheet(f"color: {color};")
+        self.value_label.setText(f"{value:,.2f} {cur}")
+        self.pl_label.setStyleSheet(f"color: {color};")
         if self.invested:
             pl = value - self.invested
-            self.pl_label.config(text=f"{pl:+,.2f} {cur}  ({pl / self.invested * 100:+.2f}%)", fg=color)
+            self.pl_label.setText(f"{pl:+,.2f} {cur}  ({pl / self.invested * 100:+.2f}%)")
         else:
-            self.pl_label.config(text="")
+            self.pl_label.setText("")
 
     def save(self):
         save_state({"btc_amount": self.amount, "invested": self.invested,
@@ -299,9 +310,8 @@ class TrackerApp:
 
     def set_amount(self):
         cur = self.cur.upper()
-        s = simpledialog.askstring("Bestand", f"Wie viel {cur} hast du in Bitcoin?\n(z.B. 500 oder 250,50)",
-                                   parent=self.root)
-        if s is None:
+        s, ok = QInputDialog.getText(self, "Bestand", f"Wie viel {cur} hast du in Bitcoin?\n(z.B. 500 oder 250,50)")
+        if not ok:
             return
         try:
             money = float(s.strip().replace(",", "."))
@@ -321,20 +331,20 @@ class TrackerApp:
         self.append_parts([(line, tag)])
 
     def append_parts(self, parts):
-        at_bottom = self.text.yview()[1] >= 0.999
-        self.text.config(state="normal")
+        bar = self.log.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 2  # nur autoscrollen, wenn ganz unten
+        cursor = QTextCursor(self.log.document())
+        cursor.movePosition(QTextCursor.End)
         for text, tag in parts:
-            self.text.insert("end", text, tag)
-        lines = int(self.text.index("end-1c").split(".")[0])
-        if lines > MAX_LINES:
-            self.text.delete("1.0", f"{lines - MAX_LINES + 1}.0")
-        self.text.config(state="disabled")
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(TAG_COLORS[tag]))
+            cursor.insertText(text, fmt)
         if at_bottom:
-            self.text.see("end")
+            QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))  # erst nach dem Layout
 
-    def close(self):
+    def closeEvent(self, event):
         self.stop.set()
-        self.root.destroy()
+        event.accept()
 
 
 def main():
@@ -343,13 +353,15 @@ def main():
     p.add_argument("-i", "--interval", type=int, default=60, help="Sekunden (min. 10)")
     p.add_argument("--log", metavar="DATEI", default=str(DEFAULT_LOG),
                    help=f"Log-Datei (Standard: {DEFAULT_LOG.name} neben dem Script)")
-    p.add_argument("--opacity", type=float, default=0.85, help="Fenster-Deckkraft 0.3-1.0 (1 = undurchsichtig)")
+    p.add_argument("--opacity", type=float, default=0.6,
+                   help="Deckkraft des HINTERGRUNDS 0-1 (0 = ganz klar, 1 = solid). Text bleibt immer klar.")
     args = p.parse_args()
 
-    root = tk.Tk()
-    TrackerApp(root, args.currency.lower(), max(args.interval, 10), args.log,
-               min(max(args.opacity, 0.3), 1.0))
-    root.mainloop()
+    app = QApplication(sys.argv[:1])
+    win = TrackerApp(args.currency.lower(), max(args.interval, 10), args.log,
+                     min(max(args.opacity, 0.0), 1.0))
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
